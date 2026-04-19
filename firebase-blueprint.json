@@ -1,0 +1,244 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile and settings",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "role": { "type": "string", "enum": ["ADMIN", "MANAGER", "MEMBER"] },
+        "institutionId": { "type": "string" },
+        "activeModules": { "type": "array", "items": { "type": "string" } },
+        "lastTaskCreatedAt": { "type": "object" },
+        "burstCount": { "type": "number" }
+      },
+      "required": ["id", "name", "email", "role"]
+    },
+    "Task": {
+      "title": "Task",
+      "description": "A task in the Eisenhower Matrix",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "quadrant": { "type": "string", "enum": ["urgent-important", "important-not-urgent", "urgent-not-important", "not-urgent-not-important"] },
+        "status": { "type": "string", "enum": ["PENDING", "COMPLETED"] },
+        "completed": { "type": "boolean" },
+        "createdAt": { "type": "object", "description": "Firestore Server Timestamp" },
+        "moduleId": { "type": "string" },
+        "institutionId": { "type": "string" }
+      },
+      "required": ["id", "userId", "title", "quadrant", "status", "completed", "createdAt"]
+    },
+    "InstitutionMember": {
+      "title": "Institution Member",
+      "description": "Membership record in an institution",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "role": { "type": "string", "enum": ["ADMIN", "MANAGER", "MEMBER"] },
+        "joinedAt": { "type": "object" }
+      },
+      "required": ["userId", "role", "joinedAt"]
+    },
+    "Subscription": {
+      "title": "Subscription",
+      "description": "User subscription details",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "planType": { "type": "string", "enum": ["BASIC", "INTERMEDIATE", "ADVANCED"] },
+        "status": { "type": "string" },
+        "expiresAt": { "type": "object" }
+      },
+      "required": ["userId", "planType", "status"]
+    },
+    "AuditLog": {
+      "title": "Audit Log",
+      "description": "Record of system actions",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "action": { "type": "string" },
+        "resource": { "type": "string" },
+        "timestamp": { "type": "object" },
+        "details": { "type": "object" }
+      },
+      "required": ["userId", "action", "resource", "timestamp"]
+    },
+    "Transaction": {
+      "title": "Transaction",
+      "description": "Financial transaction",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "amount": { "type": "number" },
+        "type": { "type": "string", "enum": ["INCOME", "EXPENSE"] },
+        "category": { "type": "string" },
+        "description": { "type": "string" },
+        "date": { "type": "object" }
+      },
+      "required": ["userId", "amount", "type", "category", "description", "date"]
+    },
+    "Devotional": {
+      "title": "Devotional",
+      "description": "Daily spiritual reflection",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "verse": { "type": "object" },
+        "notes": { "type": "string" },
+        "date": { "type": "string" }
+      },
+      "required": ["userId", "verse", "notes", "date"]
+    },
+    "Notification": {
+      "title": "Notification",
+      "description": "In-app notification",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "type": { "type": "string" },
+        "title": { "type": "string" },
+        "message": { "type": "string" },
+        "read": { "type": "boolean" },
+        "createdAt": { "type": "object" }
+      },
+      "required": ["userId", "type", "title", "message", "read", "createdAt"]
+    },
+    "Mission": {
+      "title": "Mission",
+      "description": "Institutional mission created by manager",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "reward": { "type": "string" },
+        "points": { "type": "number" },
+        "deadline": { "type": "number" },
+        "createdBy": { "type": "string" },
+        "createdAt": { "type": "object" },
+        "status": { "type": "string", "enum": ["ACTIVE", "EXPIRED"] }
+      },
+      "required": ["id", "title", "points", "deadline", "createdBy", "createdAt", "status"]
+    },
+    "Ranking": {
+      "title": "Ranking",
+      "description": "Weekly points ranking",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "userName": { "type": "string" },
+        "points": { "type": "number" },
+        "weekId": { "type": "string" }
+      },
+      "required": ["userId", "userName", "points", "weekId"]
+    },
+    "Group": {
+      "title": "User Group",
+      "description": "Functional groups within an institution (e.g., HR, Sales)",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "institutionId": { "type": "string" },
+        "members": { "type": "array", "items": { "type": "string" } },
+        "createdAt": { "type": "object", "description": "Firestore Server Timestamp" }
+      },
+      "required": ["name", "institutionId", "members", "createdAt"]
+    },
+    "LogisticsAddress": {
+      "title": "Logistics Address",
+      "description": "Saved address for logistics and travel time",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "label": { "type": "string" },
+        "address": { "type": "string" },
+        "type": { "type": "string", "enum": ["WORK", "HOME", "DELIVERY", "OTHER"] }
+      },
+      "required": ["id", "userId", "label", "address", "type"]
+    },
+    "Message": {
+      "title": "Message",
+      "description": "Chat message",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "senderId": { "type": "string" },
+        "senderName": { "type": "string" },
+        "receiverId": { "type": "string" },
+        "groupId": { "type": "string" },
+        "taskId": { "type": "string" },
+        "text": { "type": "string" },
+        "createdAt": { "type": "object" },
+        "read": { "type": "boolean" }
+      },
+      "required": ["id", "senderId", "senderName", "text", "createdAt", "read"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "Private user profile"
+    },
+    "/tasks/{taskId}": {
+      "schema": "Task",
+      "description": "User tasks"
+    },
+    "/institutions/{institutionId}": {
+      "schema": "Institution",
+      "description": "Institution data"
+    },
+    "/institutions/{institutionId}/members/{userId}": {
+      "schema": "InstitutionMember",
+      "description": "Institution membership"
+    },
+    "/subscriptions/{userId}": {
+      "schema": "Subscription",
+      "description": "User subscription"
+    },
+    "/audit_logs/{logId}": {
+      "schema": "AuditLog",
+      "description": "System audit logs"
+    },
+    "/finance_transactions/{transactionId}": {
+      "schema": "Transaction",
+      "description": "User financial records"
+    },
+    "/spiritual_devotionals/{devotionalId}": {
+      "schema": "Devotional",
+      "description": "User spiritual records"
+    },
+    "/notifications/{notificationId}": {
+      "schema": "Notification",
+      "description": "User notifications"
+    },
+    "/missions/{missionId}": {
+      "schema": "Mission",
+      "description": "Institutional missions"
+    },
+    "/rankings/{rankingId}": {
+      "schema": "Ranking",
+      "description": "Weekly rankings"
+    },
+    "/logistics_addresses/{addressId}": {
+      "schema": "LogisticsAddress",
+      "description": "User saved addresses"
+    },
+    "/messages/{messageId}": {
+      "schema": "Message",
+      "description": "Chat messages"
+    },
+    "/groups/{groupId}": {
+      "schema": "Group",
+      "description": "Institutional groups"
+    }
+  }
+}

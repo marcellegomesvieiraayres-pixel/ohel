@@ -1,0 +1,241 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // 0. Global Safety Net
+    // ===============================================================
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // Cached user data for relational checks
+    function getUser() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        request.auth.token.email == "marcelle.gomesvieira.ayres@gmail.com" ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && getUser().role == 'ADMIN')
+      );
+    }
+
+    function isManager() {
+      return isSignedIn() && (
+        isAdmin() ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && getUser().role in ['ADMIN', 'MANAGER'])
+      );
+    }
+
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
+
+    // Burst Rate Limiting Invariant
+    function enforceBurstLimit() {
+      return isAdmin() || (
+        getAfter(/databases/$(database)/documents/users/$(request.auth.uid)).data.lastTaskCreatedAt == request.time &&
+        (
+          (request.time > get(/databases/$(database)/documents/users/$(request.auth.uid)).data.lastTaskCreatedAt + duration.value(10, 's')) ||
+          (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.burstCount < 3)
+        )
+      );
+    }
+
+    // ===============================================================
+    // Entity Validators
+    // ===============================================================
+
+    function isValidUser(data) {
+      return data.id is string && data.name is string && data.name.size() <= 100 &&
+             data.email is string && data.email.size() <= 100 &&
+             data.role in ['ADMIN', 'MANAGER', 'MEMBER'] &&
+             (!('institutionId' in data) || (data.institutionId is string && data.institutionId.size() <= 128));
+    }
+
+    function isValidTask(data) {
+      return data.userId is string && data.userId == (isAdmin() ? data.userId : request.auth.uid) &&
+             data.title is string && data.title.size() <= 200 &&
+             data.quadrant in ['urgent-important', 'important-not-urgent', 'urgent-not-important', 'not-urgent-not-important'] &&
+             data.status is string && data.completed is bool &&
+             data.createdAt == (existing() == null ? request.time : existing().createdAt);
+    }
+
+    // ===============================================================
+    // Collection Rules
+    // ===============================================================
+
+    // Simplified institution membership check
+    function isMemberOf(instId) {
+      return isSignedIn() && exists(/databases/$(database)/documents/institutions/$(instId)/members/$(request.auth.uid));
+    }
+
+    match /users/{userId} {
+      allow get: if isOwner(userId) || isAdmin() || 
+                    (isSignedIn() && existing().institutionId != null && isMemberOf(existing().institutionId));
+      
+      // Query Enforcer for list: must filter by institutionId or be the owner
+      allow list: if isSignedIn() && (
+        isAdmin() || 
+        (request.query.limit <= 500 && isMemberOf(existing().institutionId))
+      );
+
+      allow create: if isOwner(userId) && isValidUser(incoming()) && isVerified();
+      
+      allow update: if (isOwner(userId) || isAdmin()) &&
+                    isValidUser(incoming()) &&
+                    (isAdmin() || (
+                      incoming().role == existing().role &&
+                      incoming().email == existing().email &&
+                      incoming().institutionId == existing().institutionId &&
+                      isVerified()
+                    )) &&
+                    incoming().diff(existing()).affectedKeys().hasOnly(['lastTaskCreatedAt', 'burstCount', 'activeModules', 'name', 'photoURL', 'themePreference', 'journeyTotalDays', 'role']);
+    }
+
+    match /tasks/{taskId} {
+      allow get: if isSignedIn() && (
+        existing().userId == request.auth.uid || 
+        (existing().assignedTo != null && request.auth.uid in existing().assignedTo) ||
+        isAdmin()
+      );
+      
+      allow list: if isSignedIn() && (
+        isAdmin() ||
+        existing().userId == request.auth.uid ||
+        (existing().assignedTo != null && request.auth.uid in existing().assignedTo) ||
+        (existing().institutionId != null && isMemberOf(existing().institutionId))
+      );
+      
+      allow create: if isVerified() && 
+                    isValidTask(incoming()) &&
+                    isValidId(taskId) &&
+                    enforceBurstLimit() &&
+                    existsAfter(/databases/$(database)/documents/audit_logs/$(taskId + '_create'));
+      
+      allow update: if isVerified() && 
+                    (existing().userId == request.auth.uid || isAdmin() || (existing().assignedTo != null && request.auth.uid in existing().assignedTo)) &&
+                    isValidTask(incoming()) &&
+                    incoming().userId == existing().userId &&
+                    incoming().createdAt == existing().createdAt;
+      
+      allow delete: if isVerified() && 
+                    (existing().userId == request.auth.uid || isAdmin()) &&
+                    existsAfter(/databases/$(database)/documents/audit_logs/$(taskId + '_delete'));
+    }
+
+    match /institutions/{institutionId} {
+      allow get: if isSignedIn();
+      allow list: if isSignedIn(); // Broad list allowed for joining, but restricted by client usually
+      allow create: if isVerified() && isValidId(institutionId);
+      allow update: if isVerified() && (isAdmin() || exists(/databases/$(database)/documents/institutions/$(institutionId)/members/$(request.auth.uid)));
+
+      match /members/{memberId} {
+        allow read: if isSignedIn() && (
+          isAdmin() || 
+          exists(/databases/$(database)/documents/institutions/$(institutionId)/members/$(request.auth.uid))
+        );
+        allow write: if isVerified() && (
+          isAdmin() || 
+          (exists(/databases/$(database)/documents/institutions/$(institutionId)/members/$(request.auth.uid)) && 
+           get(/databases/$(database)/documents/institutions/$(institutionId)/members/$(request.auth.uid)).data.role in ['ADMIN', 'MANAGER'])
+        );
+      }
+    }
+
+    match /subscriptions/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow write: if isAdmin();
+    }
+
+    match /audit_logs/{logId} {
+      allow read: if isAdmin();
+      allow create: if isSignedIn() && 
+                    incoming().userId == request.auth.uid &&
+                    incoming().timestamp == request.time;
+    }
+
+    match /notifications/{notificationId} {
+      allow read: if isSignedIn() && (existing().userId == request.auth.uid || isAdmin());
+      allow create: if isSignedIn();
+      allow update: if isVerified() && isOwner(existing().userId) &&
+                    incoming().diff(existing()).affectedKeys().hasOnly(['read']);
+      allow delete: if isVerified() && isOwner(existing().userId);
+    }
+
+    match /messages/{messageId} {
+      allow read: if isSignedIn() && (
+        existing().senderId == request.auth.uid || 
+        existing().receiverId == request.auth.uid || 
+        isManager()
+      );
+      allow create: if isVerified() && (
+        incoming().senderId == request.auth.uid || 
+        isManager()
+      );
+    }
+
+    // Simplification for other collections
+    match /finance_transactions/{id} { allow read: if isOwner(existing().userId); allow write: if isOwner(incoming().userId || existing().userId) && isVerified(); }
+    match /personal_finance/{id} { allow read: if isOwner(existing().userId); allow write: if isOwner(incoming().userId || existing().userId) && isVerified(); }
+    match /professional_finance/{id} { allow read: if isOwner(existing().userId); allow write: if isOwner(incoming().userId || existing().userId) && isVerified(); }
+    match /spiritual_devotionals/{id} { allow read: if isOwner(existing().userId); allow write: if isOwner(incoming().userId || existing().userId) && isVerified(); }
+    match /spiritual_reading_plans/{id} { allow read: if isOwner(existing().userId); allow write: if isOwner(incoming().userId || existing().userId) && isVerified(); }
+    match /spiritual_goals/{id} { allow read: if isOwner(existing().userId); allow write: if isOwner(incoming().userId || existing().userId) && isVerified(); }
+    match /fitness_habits/{id} { allow read: if isOwner(existing().userId); allow write: if isOwner(incoming().userId || existing().userId) && isVerified(); }
+    match /wellbeing_logs/{id} { allow read: if isOwner(existing().userId); allow write: if isOwner(incoming().userId || existing().userId) && isVerified(); }
+    match /library_items/{id} { allow read: if isOwner(existing().userId); allow write: if isOwner(incoming().userId || existing().userId) && isVerified(); }
+    match /personal_family/{id} { allow read: if isOwner(existing().userId); allow write: if isOwner(incoming().userId || existing().userId) && isVerified(); }
+    match /pix_keys/{id} { allow read: if isOwner(existing().userId); allow write: if isOwner(incoming().userId || existing().userId) && isVerified(); }
+    match /logistics_addresses/{id} { allow read: if isOwner(existing().userId); allow write: if isOwner(incoming().userId || existing().userId) && isVerified(); }
+
+    match /missions/{missionId} {
+      allow read: if isSignedIn();
+      allow write: if isManager() && isVerified();
+    }
+
+    function isValidMissionCompletion(data) {
+      return data.id is string && data.missionId is string &&
+             data.userId is string && data.userId == request.auth.uid &&
+             data.status in ['PENDING', 'AUTHORIZED', 'REJECTED'] &&
+             data.points is number;
+    }
+
+    match /mission_completions/{id} {
+      allow read: if isSignedIn();
+      allow create: if isVerified() && isValidMissionCompletion(incoming());
+      allow update: if isVerified() && (
+        isAdmin() || 
+        (existing().userId == request.auth.uid && incoming().userId == existing().userId && incoming().status == existing().status) ||
+        (isManager() && incoming().userId == existing().userId && incoming().status in ['AUTHORIZED', 'REJECTED'])
+      );
+      allow delete: if isAdmin();
+    }
+
+    match /rankings/{rankingId} {
+      allow read: if isSignedIn();
+      allow write: if isManager() && isVerified();
+    }
+
+    match /groups/{groupId} {
+      allow read: if isSignedIn() && (isAdmin() || (existing().institutionId != null && isMemberOf(existing().institutionId)));
+      allow write: if isVerified() && isManager();
+    }
+  }
+}
