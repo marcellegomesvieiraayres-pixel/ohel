@@ -1,0 +1,264 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // 0. Global Safety Net
+    // ===============================================================
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return isSignedIn() && (isPlatformAdmin() || request.auth.token.email_verified == true);
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // Cached user data for relational checks
+    function getUser() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        request.auth.token.email == "marcelle.gomesvieira.ayres@gmail.com" ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && getUser().role == 'ADMIN') ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && getUser().get('isPlatformAdmin', false) == true)
+      );
+    }
+
+    function isPlatformAdmin() {
+      return isSignedIn() && (
+        request.auth.token.email == "marcelle.gomesvieira.ayres@gmail.com" ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && getUser().get('isPlatformAdmin', false) == true)
+      );
+    }
+
+    function isManager() {
+      return isSignedIn() && (
+        isAdmin() ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && getUser().role in ['ADMIN', 'MANAGER'])
+      );
+    }
+
+    function getPlanLimit(plan) {
+      return plan == 'PERSONAL_BASIC' ? 2 :
+             plan == 'PERSONAL_INTERMEDIATE' ? 5 :
+             plan == 'PERSONAL_ADVANCED' ? 10 :
+             plan == 'INSTITUTION_BASIC' ? 25 :
+             plan == 'INSTITUTION_INTERMEDIATE' ? 75 :
+             999999;
+    }
+
+    function getSubscription() {
+      return get(/databases/$(database)/documents/subscriptions/$(request.auth.uid)).data;
+    }
+
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
+
+    // Burst Rate Limiting Invariant
+    function enforceBurstLimit() {
+      return isPlatformAdmin() || (
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        getAfter(/databases/$(database)/documents/users/$(request.auth.uid)).data.lastTaskCreatedAt == request.time &&
+        (
+          (request.time > get(/databases/$(database)/documents/users/$(request.auth.uid)).data.lastTaskCreatedAt + duration.value(10, 's')) ||
+          (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('burstCount', 0) < 3)
+        )
+      );
+    }
+
+    // ===============================================================
+    // Entity Validators
+    // ===============================================================
+
+    function isValidUser(data) {
+      return data.id is string && data.name is string && data.name.size() <= 100 &&
+             data.email is string && data.email.size() <= 100 &&
+             data.role in ['ADMIN', 'MANAGER', 'MEMBER'] &&
+             (!('institutionId' in data) || (data.institutionId is string || data.institutionId == null)) &&
+             (!('photoURL' in data) || (data.photoURL is string && data.photoURL.size() <= 10 * 1024 * 1024)) &&
+             (!('themePreference' in data) || (data.themePreference in ['light', 'dark', 'system'])) &&
+             (!('activeModules' in data) || (data.activeModules is list));
+    }
+
+    function isValidTask(data) {
+      return data.userId is string && (isPlatformAdmin() || data.userId == request.auth.uid || (data.get('assignedTo', []) is list && request.auth.uid in data.get('assignedTo', []))) &&
+             data.title is string && data.title.size() <= 200 &&
+             data.status is string && data.completed is bool &&
+             data.createdAt == (existing() == null ? request.time : existing().createdAt);
+    }
+
+    // ===============================================================
+    // Collection Rules
+    // ===============================================================
+
+    // Simplified institution membership check
+    function isMemberOf(instId) {
+      return isSignedIn() && instId != null && exists(/databases/$(database)/documents/institutions/$(instId)/members/$(request.auth.uid));
+    }
+
+    match /users/{userId} {
+      allow get: if isOwner(userId) || isPlatformAdmin() || 
+                    (isSignedIn() && existing().institutionId != null && isMemberOf(existing().institutionId));
+      
+      allow list: if isSignedIn() && (
+        isPlatformAdmin() || 
+        (request.query.limit <= 500 && resource.data.institutionId != null && isMemberOf(resource.data.institutionId))
+      );
+
+      allow create: if isOwner(userId) && isValidUser(incoming());
+      
+      allow update: if (isOwner(userId) || isPlatformAdmin()) &&
+                    isValidUser(incoming());
+    }
+
+    match /tasks/{taskId} {
+      allow read: if isSignedIn() && (
+        isPlatformAdmin() ||
+        existing().userId == request.auth.uid || 
+        (existing().get('assignedTo', []) is list && request.auth.uid in existing().get('assignedTo', []))
+      );
+      
+      allow create: if isVerified() && 
+                    isValidTask(incoming()) &&
+                    isValidId(taskId) &&
+                    enforceBurstLimit() &&
+                    (isPlatformAdmin() || existsAfter(/databases/$(database)/documents/audit_logs/$(taskId + '_create')));
+      
+      allow update: if isVerified() && 
+                    (isPlatformAdmin() || existing().userId == request.auth.uid || (existing().get('assignedTo', []) is list && request.auth.uid in existing().get('assignedTo', []))) &&
+                    isValidTask(incoming()) &&
+                    incoming().userId == existing().userId &&
+                    incoming().createdAt == existing().createdAt;
+      
+      allow delete: if isVerified() && 
+                    (isPlatformAdmin() || existing().userId == request.auth.uid) &&
+                    (isPlatformAdmin() || existsAfter(/databases/$(database)/documents/audit_logs/$(taskId + '_delete')));
+    }
+
+    match /institutions/{institutionId} {
+      allow read: if isSignedIn();
+      allow create: if isVerified() && (isPlatformAdmin() || isValidId(institutionId));
+      allow update: if isVerified() && (
+        isPlatformAdmin() || 
+        (
+          exists(/databases/$(database)/documents/institutions/$(institutionId)/members/$(request.auth.uid)) &&
+          get(/databases/$(database)/documents/institutions/$(institutionId)/members/$(request.auth.uid)).data.role in ['ADMIN', 'MANAGER'] &&
+          (
+            !incoming().diff(existing()).affectedKeys().hasAny(['inviteCode']) ||
+            (existing().get('membersCount', 1) < getPlanLimit(getSubscription().planType))
+          )
+        )
+      );
+
+      match /members/{memberId} {
+        allow read: if isSignedIn() && (
+          isPlatformAdmin() || 
+          exists(/databases/$(database)/documents/institutions/$(institutionId)/members/$(request.auth.uid))
+        );
+        allow write: if isVerified() && (
+          isPlatformAdmin() || 
+          (exists(/databases/$(database)/documents/institutions/$(institutionId)/members/$(request.auth.uid)) && 
+           get(/databases/$(database)/documents/institutions/$(institutionId)/members/$(request.auth.uid)).data.role in ['ADMIN', 'MANAGER'])
+        );
+      }
+    }
+
+    match /subscriptions/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow write: if isAdmin();
+    }
+
+    match /config/pricing {
+      allow read: if isSignedIn();
+      allow write: if isPlatformAdmin();
+    }
+
+    match /audit_logs/{logId} {
+      allow read: if isManager();
+      allow create: if isSignedIn() && 
+                    incoming().userId == request.auth.uid &&
+                    incoming().timestamp == request.time;
+    }
+
+    match /notifications/{notificationId} {
+      allow read: if isSignedIn() && (existing().userId == request.auth.uid || isAdmin());
+      allow create: if isSignedIn();
+      allow update: if isVerified() && isOwner(existing().userId) &&
+                    incoming().diff(existing()).affectedKeys().hasOnly(['read']);
+      allow delete: if isVerified() && isOwner(existing().userId);
+    }
+
+    match /messages/{messageId} {
+      allow read: if isSignedIn() && (
+        existing().senderId == request.auth.uid || 
+        existing().receiverId == request.auth.uid || 
+        isManager()
+      );
+      allow create: if isVerified() && (
+        incoming().senderId == request.auth.uid || 
+        isManager()
+      );
+    }
+
+    // Simplification for other collections
+    match /finance_transactions/{id} { allow read: if isOwner(existing().userId) || isPlatformAdmin(); allow write: if (isOwner(incoming().userId || existing().userId) || isPlatformAdmin()) && isVerified(); }
+    match /personal_finance/{id} { allow read: if isOwner(existing().userId) || isPlatformAdmin(); allow write: if (isOwner(incoming().userId || existing().userId) || isPlatformAdmin()) && isVerified(); }
+    match /professional_finance/{id} { allow read: if isOwner(existing().userId) || isPlatformAdmin(); allow write: if (isOwner(incoming().userId || existing().userId) || isPlatformAdmin()) && isVerified(); }
+    match /spiritual_devotionals/{id} { allow read: if isOwner(existing().userId) || isPlatformAdmin(); allow write: if (isOwner(incoming().userId || existing().userId) || isPlatformAdmin()) && isVerified(); }
+    match /spiritual_reading_plans/{id} { allow read: if isOwner(existing().userId) || isPlatformAdmin(); allow write: if (isOwner(incoming().userId || existing().userId) || isPlatformAdmin()) && isVerified(); }
+    match /spiritual_goals/{id} { allow read: if isOwner(existing().userId) || isPlatformAdmin(); allow write: if (isOwner(incoming().userId || existing().userId) || isPlatformAdmin()) && isVerified(); }
+    match /fitness_habits/{id} { allow read: if isOwner(existing().userId) || isPlatformAdmin(); allow write: if (isOwner(incoming().userId || existing().userId) || isPlatformAdmin()) && isVerified(); }
+    match /wellbeing_logs/{id} { allow read: if isOwner(existing().userId) || isPlatformAdmin(); allow write: if (isOwner(incoming().userId || existing().userId) || isPlatformAdmin()) && isVerified(); }
+    match /library_items/{id} { allow read: if isOwner(existing().userId) || isPlatformAdmin(); allow write: if (isOwner(incoming().userId || existing().userId) || isPlatformAdmin()) && isVerified(); }
+    match /personal_family/{id} { allow read: if isOwner(existing().userId) || isPlatformAdmin(); allow write: if (isOwner(incoming().userId || existing().userId) || isPlatformAdmin()) && isVerified(); }
+    match /pix_keys/{id} { allow read: if isOwner(existing().userId) || isPlatformAdmin(); allow write: if (isOwner(incoming().userId || existing().userId) || isPlatformAdmin()) && isVerified(); }
+    match /logistics_addresses/{id} { allow read: if isOwner(existing().userId) || isPlatformAdmin(); allow write: if (isOwner(incoming().userId || existing().userId) || isPlatformAdmin()) && isVerified(); }
+
+    match /missions/{missionId} {
+      allow read: if isSignedIn();
+      allow write: if isManager() && isVerified();
+    }
+
+    function isValidMissionCompletion(data) {
+      return data.id is string && data.missionId is string &&
+             data.userId is string && (isPlatformAdmin() || data.userId == request.auth.uid) &&
+             data.status in ['PENDING', 'AUTHORIZED', 'REJECTED'] &&
+             data.points is number;
+    }
+
+    match /mission_completions/{id} {
+      allow read: if isSignedIn();
+      allow create: if isVerified() && isValidMissionCompletion(incoming());
+      allow update: if isVerified() && (
+        isPlatformAdmin() || 
+        (existing().userId == request.auth.uid && incoming().userId == existing().userId && incoming().status == existing().status) ||
+        (isManager() && incoming().userId == existing().userId && incoming().status in ['AUTHORIZED', 'REJECTED'])
+      );
+      allow delete: if isPlatformAdmin();
+    }
+
+    match /rankings/{rankingId} {
+      allow read: if isSignedIn();
+      allow write: if isManager() && isVerified();
+    }
+
+    match /groups/{groupId} {
+      allow read: if isSignedIn() && (isPlatformAdmin() || (existing().institutionId != null && isMemberOf(existing().institutionId)));
+      allow write: if isVerified() && isManager();
+    }
+  }
+}
