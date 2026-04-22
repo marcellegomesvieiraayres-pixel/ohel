@@ -129,7 +129,9 @@ service cloud.firestore {
       allow read: if isSignedIn() && (
         isPlatformAdmin() ||
         existing().userId == request.auth.uid || 
-        (existing().get('assignedTo', []) is list && request.auth.uid in existing().get('assignedTo', []))
+        (existing().get('assignedTo', []) is list && request.auth.uid in existing().assignedTo) ||
+        (existing().get('visibleToUsers', []) is list && request.auth.uid in existing().visibleToUsers) ||
+        (existing().get('visibility', 'PUBLIC') == 'PUBLIC' && existing().institutionId != null && isMemberOf(existing().institutionId))
       );
       
       allow create: if isVerified() && 
@@ -139,7 +141,7 @@ service cloud.firestore {
                     (isPlatformAdmin() || existsAfter(/databases/$(database)/documents/audit_logs/$(taskId + '_create')));
       
       allow update: if isVerified() && 
-                    (isPlatformAdmin() || existing().userId == request.auth.uid || (existing().get('assignedTo', []) is list && request.auth.uid in existing().get('assignedTo', []))) &&
+                    (isPlatformAdmin() || existing().userId == request.auth.uid || (existing().get('assignedTo', []) is list && request.auth.uid in existing().assignedTo)) &&
                     isValidTask(incoming()) &&
                     incoming().userId == existing().userId &&
                     incoming().createdAt == existing().createdAt;
@@ -217,6 +219,18 @@ service cloud.firestore {
     // Simplification for other collections
     match /finance_transactions/{id} { allow read: if isOwner(existing().userId) || isPlatformAdmin(); allow write: if (isOwner(incoming().userId || existing().userId) || isPlatformAdmin()) && isVerified(); }
     match /personal_finance/{id} { allow read: if isOwner(existing().userId) || isPlatformAdmin(); allow write: if (isOwner(incoming().userId || existing().userId) || isPlatformAdmin()) && isVerified(); }
+    match /task_templates/{id} {
+      allow read: if isSignedIn() && (
+        resource.data.userId == request.auth.uid || 
+        (resource.data.institutionId != null && resource.data.institutionId == getUser().institutionId) ||
+        isPlatformAdmin()
+      );
+      allow write: if isSignedIn() && (
+        (incoming().userId == request.auth.uid || isManager()) ||
+        isPlatformAdmin()
+      );
+    }
+
     match /professional_finance/{id} { allow read: if isOwner(existing().userId) || isPlatformAdmin(); allow write: if (isOwner(incoming().userId || existing().userId) || isPlatformAdmin()) && isVerified(); }
     match /spiritual_devotionals/{id} { allow read: if isOwner(existing().userId) || isPlatformAdmin(); allow write: if (isOwner(incoming().userId || existing().userId) || isPlatformAdmin()) && isVerified(); }
     match /spiritual_reading_plans/{id} { allow read: if isOwner(existing().userId) || isPlatformAdmin(); allow write: if (isOwner(incoming().userId || existing().userId) || isPlatformAdmin()) && isVerified(); }

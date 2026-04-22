@@ -9,7 +9,16 @@ import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
 
+import { StreamClient } from '@stream-io/node-sdk';
+
 dotenv.config();
+
+// Initialize Stream Client
+const streamApiKey = process.env.STREAM_API_KEY;
+const streamApiSecret = process.env.STREAM_API_SECRET;
+const streamClient = streamApiKey && streamApiSecret 
+  ? new StreamClient(streamApiKey, streamApiSecret) 
+  : null;
 
 // Initialize Firebase Admin with smarter credential detection
 if (!admin.apps.length) {
@@ -145,8 +154,43 @@ async function startServer() {
       timestamp: new Date().toISOString(),
       env: process.env.NODE_ENV,
       stripe: !!stripe,
-      firebase: !!admin.apps.length
+      firebase: !!admin.apps.length,
+      stream: !!streamClient
     });
+  });
+
+  // Stream Token Generation
+  app.post('/api/stream-token', async (req, res) => {
+    if (!streamClient) {
+      return res.status(500).json({ error: 'Stream not configured' });
+    }
+
+    const { userId } = req.body;
+    if (!userId) {
+      return res.status(400).json({ error: 'userId is required' });
+    }
+
+    try {
+      // Validate that the user exists in Firebase to prevent token harvesting
+      const userDoc = await db.collection('users').doc(userId).get();
+      if (!userDoc.exists) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+
+      // Expire in 1 hour
+      const expirationTime = Math.floor(Date.now() / 1000) + 3600;
+      const issuedAt = Math.floor(Date.now() / 1000) - 60;
+      
+      const token = streamClient.generateUserToken({ 
+        user_id: userId,
+        validity_in_seconds: 3600
+      });
+
+      res.json({ token, apiKey: streamApiKey });
+    } catch (error: any) {
+      console.error('Error generating Stream token:', error);
+      res.status(500).json({ error: error.message });
+    }
   });
 
   // Validate Invitation Code (New)
